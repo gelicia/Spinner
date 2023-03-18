@@ -1,33 +1,25 @@
 #include <Arduino.h>
 #include "TimerOne.h"
 
-
-#define D_BG
-
-#ifdef DBG
-#define Serial_begin Serial.begin
-#define Serial_println Serial.println
-#define Serial_print Serial.print
-#else
-#define Serial_begin(x)
-#define Serial_println(x) 
-#define Serial_print(x)
-#endif
-
 const int PinCLK=7;                   // Used for generating interrupts using CLK signal
 const int PinDT=8;                    // Used for reading DT signal
 const int PinSW=9;                    // Used for the push button switch
 bool bLastCLK=false;
 
+const int PinSig=4;    //rpm input
+const int PinZF=2;     //direction
+const int PinVR=3;     //speed PWM
+const int PinEL=5;     //enable
+const int PinFoot=A1;  // Used for foot pedal
 
-const int PinSig=4; //rpm input
-const int PinZF=2;  //direction
-const int PinVR=3;  //speed PWM
-const int PinEL=5;  //enable
+int prevFootRead = 0;
+int maxFootRPM = 300; // the higher this is, the harder it is to do subtle footpedal speed control (range 0-1000)
+int maxSpeed = 80; // range 0-255
+bool lastDir = true; // save the direction it was spinning last when stopped with the knob, so the footpedal can use the same direction when restarting
 
 void setup() {
-    Serial_begin(9600);
-    Serial_println("Spinner");
+    Serial.begin(9600);
+    Serial.println("Spinner");
 
     pinMode(PinSig, INPUT);
     pinMode(PinZF, OUTPUT);
@@ -38,123 +30,101 @@ void setup() {
     pinMode(PinCLK,INPUT);
     pinMode(PinDT,INPUT);  
     pinMode(PinSW,INPUT_PULLUP);
-    //attachInterrupt (1,isr,CHANGE);   // interrupt 1 is always connected to pin 3 on Arduino UNO
+    pinMode(PinFoot, INPUT);
     bLastCLK=digitalRead(PinCLK);
-
+    prevFootRead=analogRead(PinFoot);    
 
     Timer1.initialize(100);  // 10 us = 100 kHz
     Timer1.attachInterrupt(stepperAdvance);
-    Serial_println("init.done");
+    Serial.println("init.done");
 }
 
 unsigned int cnt=0;
 int iRPM=0;
-int iRPMStop=0;
-unsigned long iStepCount=0;
-
-/*void isr ()  {                    // Interrupt service routine is executed when a HIGH to LOW transition is detected on CLK
-  bool bCLK=digitalRead(PinCLK);
-  bool bDT=digitalRead(PinDT);
-
-      Serial_print(bCLK);
-      Serial_print(",");
-      Serial_print(bDT);
-      Serial_print("\n");
-  
-  bool up = bCLK == bDT;
-  if(up) iRPM-=5; else iRPM+=5;
-  if(iRPM<0) iRPM=0;
-  if(iRPM>400) iRPM=400;
-}*/
+bool footControl=false;
 
 void loop() {
   cnt++;
   digitalWrite(LED_BUILTIN, ((cnt/10)&1)!=0);
 
-  const int iMin=30;
+  const int iMin=10;
+  // iRPM is -1000 - 1000, speed is always positive
   int iR=iRPM>=0?iRPM:-iRPM;
-  
-  analogWrite(PinVR,iMin + (long(iR)*(255-iMin)/1000));
-  digitalWrite(PinEL, iRPM!=0);
-  digitalWrite(PinZF, iRPM>0);
+  //speed is between 0-255
+  int speed = iMin + (long(iR)*(255-iMin)/1000);
+  speed = constrain(speed, 0, maxSpeed);
 
-  if(iRPM<1) return;
+  Serial.print("speed write: ");
+  Serial.print(iRPM!= 0 ? speed: 0);
+  Serial.print(", off: ");
+  Serial.println(iRPM!=0);
+    
+  analogWrite(PinVR, iRPM!= 0 ? speed: 0);
+  digitalWrite(PinEL, iRPM!=0); //Stop if iRPM is 0 : HIGH = go, LOW = stop
+  digitalWrite(PinZF, iRPM>0); // Direction based on iRPM +/- :  HIGH = forward, LOW = back
+
+// footpedal range is 83-1020
+// iRPM range is -1000-1000
+// foot pedal doesnt change direction, just speed
+  int footRead = analogRead(PinFoot);
+  // if weve been using the knob to control but the footpedal speed changes, we go to foot to control
+  // this has to fall outside a +-10 threshhold because the footpedal has some jitter
+  if (!footControl && ((footRead > (prevFootRead + 10)) || (footRead < (prevFootRead - 10)))) {
+    footControl = true;
+  }
+  
+  if (footControl) { 
+    prevFootRead = footRead;
+    // if we last stopped it by pressing the button, use last direction
+    bool posDir = iRPM == 0 ? lastDir : iRPM>=0;
+    // intentionally let more values count as min or max
+    int speed = map(footRead, 990, 75, 0, maxFootRPM);
+    speed = constrain(speed, 0, maxFootRPM);   
+    // footPedal will never change direction, so get prev direction 
+    if (!posDir) {
+      speed = speed * -1;
+    }   
+    Serial.print("foot iRPM: ");
+    Serial.println(speed); 
+    /*Serial.print(", foot val: "); 
+    Serial.println(footRead); */     
+    iRPM = speed;
+  }
+
   delay(10);
-  
-
-#ifdef DBG
-  //*
-  unsigned int iNM=millis();
-  static unsigned int iLastLog=0;
-  if(iNM>iLastLog+500) {
-    iLastLog=iNM;
-
-    const long iRot=(iStepCount*GEAR_A)/(GEAR_B*SIGPR);
-    //const int iMSTEPS=(long(STEPS_PERREV*32)*GEAR_B)/GEAR_A;
-
-    Serial_print(iRPM);
-    Serial_print(",");
-    Serial_print(iStepCount);
-    Serial_print(",");
-    Serial_print(iRot);
-    Serial_print("\n");
-    cnt=0;
-  }/**/
-#endif
-
-  //Serial.println("loop");
 }
 
-unsigned long iLastStep=0;
-bool bStepOn=false;
 unsigned int iClick=0;
-bool bSig=false;
 
 void stepperAdvance() {
-  unsigned long iNow=micros();
-  if(iNow<iLastStep) {iLastStep=iNow;}; //overflow
-
-  bool bCLK=digitalRead(PinCLK);
-  if(bLastCLK!=bCLK) {
-    bLastCLK=bCLK;
-    bool bDT=digitalRead(PinDT);
-    if(bDT!=bCLK) {
-      iRPM+=20;
-      if(iRPM>1000) iRPM=1000;
-      iRPMStop=0;
-    } else {
-      iRPM-=20;
-      if(iRPM<-1000) iRPM=-1000;
-      iRPMStop=0;
-    }
- }
-  
-  if (!(digitalRead(PinSW))) {
-    //Serial_print(iClick);
+  if (digitalRead(PinSW) == LOW) {
+    Serial.print("button press: ");
+    Serial.println(iClick);
     iClick++;
-    if(iClick>7000) {iStepCount=0;iRPMStop=0;};
+    if(iClick==10) { // stop after 10 counts of this
+      footControl = false; // ignore footpedal logic
+      lastDir = iRPM > 0;
+      iRPM = 0;
+    }      
+  } else {
+    iClick=0;
 
-    if(iClick==10)
-    {
-      if(iRPMStop!=0)
-      {
-        iRPM=iRPMStop;
-        iRPMStop=0;
+    bool bCLK=digitalRead(PinCLK);
+    if(bLastCLK!=bCLK) {
+      Serial.println("knob turn");
+      footControl = false; // ignore footpedal logic
+      bLastCLK=bCLK;
+      bool bDT=digitalRead(PinDT);
+      if(bDT!=bCLK) {
+        iRPM+=20;
+        if(iRPM>1000) iRPM=1000;
       } else {
-        iRPMStop=iRPM;
-        iRPM=0;
+        iRPM-=20;
+        if(iRPM<-1000) iRPM=-1000;
       }
+
+      Serial.print("knob iRPM: ");
+      Serial.println(iRPM);
     }
-  } else {iClick=0;}
-
-
-  bool bS=digitalRead(PinSig);
-  if(bS!=bSig) {
-    iStepCount++;
-    bSig=bS;
-  };
+  }
 }
-
-
-
-
