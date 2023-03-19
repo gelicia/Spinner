@@ -15,6 +15,8 @@ This fork changes the following:
 - Cut a hole for the jack socket and use included nut to hold in place. I put mine back by the motor.
 - 5V and GND can go on the existing 5V and GND wires from the driver board. Signal wire goes to A1.
 
+![CEA3E93D-6E48-4A3B-A05A-CF3B5905AEF3](https://user-images.githubusercontent.com/1533128/226193536-8b0e7801-ee8d-4c16-ab81-a3b2bbf7b18e.jpeg)
+
 The program included operates where going clockwise is default and counter clockwise needs an action. The knob on it will adjust the direction, and also allows for faster spinning. The higher the max speed for the footpedal, the harder it is to fine tune the speed with your foot, so I set the max speed the pedal allows for to be comparitively low compared to the max speed the knob can do.
 
 So, to spin counterclockwise, you will need to use the knob to set that direction and press the knob to stop, and then you can use your footpedal to alter the speed.
